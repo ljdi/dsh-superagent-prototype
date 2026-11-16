@@ -82,9 +82,19 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    // Transient transport failures (an EOF or TLS reset on the way to api.github.com) are retried twice before the
+    // caller records a failed read: the first catch-up poll across 150 threads otherwise always loses a few (#1521).
+    if (typeof schema === 'string') return this.transient(() => this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest]))
     const [path = '', ...flags] = rest
-    return schema.parse(await this.gh(['api', this.path(path), ...flags]))
+    return schema.parse(await this.transient(() => this.gh(['api', this.path(path), ...flags])))
+  }
+  private async transient<T>(call: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      try { return await call() }
+      catch (error) {
+        if (attempt >= 3 || !/EOF|TLS|socket hang up|timed out/i.test(String(error))) throw error
+      }
+    }
   }
   /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
   async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {

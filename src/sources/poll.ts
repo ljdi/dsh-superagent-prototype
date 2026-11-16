@@ -17,17 +17,23 @@ export const cursorAt = (started: string): string => new Date(Date.parse(started
 /** Polls each subscribed Thread of `source` within the horizon independently; records failures on the Thread as `pollError` (unless `stopped()`) and clears `pollError` on success. */
 export async function pollThreads(ctx: SourceContext, source: string, stopped: () => boolean, poll: (thread: Thread) => Promise<void>,
   skip: (thread: Thread) => boolean = () => false): Promise<void> {
-  for (const thread of ctx.threads.subscribed(source)) {
-    if (stopped()) return
-    if (skip(thread) || !polled(ctx, thread)) continue
-    try {
-      await poll(thread)
-      ctx.threads.patch(thread.key, { pollError: undefined })
-    } catch (error) {
-      if (stopped()) return
-      ctx.threads.patch(thread.key, { pollError: String(error) })
+  const pending = ctx.threads.subscribed(source).filter(thread => !skip(thread) && polled(ctx, thread))
+  let next = 0
+  // Threads are independent reads; a small pool keeps a large backlog from stretching one poll past its interval (#1521).
+  const worker = async (): Promise<void> => {
+    while (!stopped()) {
+      const thread = pending[next++]
+      if (thread === undefined) return
+      try {
+        await poll(thread)
+        ctx.threads.patch(thread.key, { pollError: undefined })
+      } catch (error) {
+        if (stopped()) return
+        ctx.threads.patch(thread.key, { pollError: String(error) })
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker))
 }
 /** Waits `ms` or until `signal` aborts using global `setTimeout` so test fake timers can drive polling loops. */
 export function pause(ms: number, signal: AbortSignal): Promise<void> {
